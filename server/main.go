@@ -10,7 +10,12 @@ import (
 	"os"
 	"time"
 
+	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
+	grpc_auth "github.com/grpc-ecosystem/go-grpc-middleware/auth"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 
 	"grpc-lesson/pb"
 )
@@ -48,6 +53,10 @@ func (*server) Download(req *pb.DownloadRequest, stream pb.FileService_DownloadS
 
 	filename := req.GetFilename()
 	path := "/Users/yu-yamano/develop/grpc-lesson/storage/" + filename
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return status.Error(codes.NotFound, "file was not found")
+	}
 
 	file, err := os.Open(path)
 	if err != nil {
@@ -127,13 +136,57 @@ func (*server) UploadAndNotifyProgress(stream pb.FileService_UploadAndNotifyProg
 	}
 }
 
+func myLogging() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+		log.Printf("fequest data: %+v", req)
+
+		resp, err = handler(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		log.Printf("response data: %+v", resp)
+
+		return resp, nil
+	}
+
+}
+
+func authorize(ctx context.Context) (context.Context, error) {
+	token, err := grpc_auth.AuthFromMD(ctx, "Bearer")
+	if err != nil {
+		return nil, err
+	}
+
+	if token != "test-token" {
+		return nil, status.Error(codes.Unauthenticated, "token is invalid")
+	}
+
+	return ctx, nil
+}
+
 func main() {
 	lis, err := net.Listen("tcp", "localhost:50051")
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
-	s := grpc.NewServer()
+	creds, err := credentials.NewClientTLSFromFile(
+		"ssl/localhost.pem",
+		"ssl/localhost-key.pem",
+	)
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	s := grpc.NewServer(
+		grpc.Creds(creds),
+		grpc.UnaryInterceptor(
+			grpc_middleware.ChainUnaryServer(
+				myLogging(),
+				grpc_auth.UnaryServerInterceptor(authorize),
+			),
+		),
+	)
 	pb.RegisterFileServiceServer(s, &server{})
 
 	fmt.Println("server is running...")
